@@ -1,0 +1,348 @@
+---
+title: "Police Shooting Prediction"
+author: "MH4510 Project Presentation"
+date: "Team Helvetios"
+output:
+  beamer_presentation: 
+    keep_tex: true
+  slidy_presentation: default
+  ioslides_presentation: default
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{makecell}
+---
+
+# Introduction
+
+**Big Idea**: Predict police shooting rates across U.S. precinct and identifying patterns to help with resource deployment to control of shootings.
+
+**Our Objective:** Predict annual state-wise shootings, and subsequently examine the results to assess the feasibility of a broader application.
+
+We studied the dataset *police_shooting.csv*, which is a combination of 6 datasets. Some details about our dataset:
+
+-   Time Period: 2015 to 2022
+
+-   Geographic Coverage: All U.S. states
+
+-   No. of Variables: 15 (including state and year)
+
+-   Normalization: Numerical variables normalized relative to state total population
+
+-   Dependent Variable: Shootings per 1 million people
+
+```{r r global_options, message=FALSE, include=FALSE}
+# the following command prevents all the R codes 
+# from being included into the slides
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+library(randomForest)
+library(dplyr)
+library(rpart.plot)
+library(caret)
+library(ranger)
+library(ggplot2)
+library(Metrics)
+library(glmnet)
+library(tidyverse)
+library(keras)
+```
+
+```{r results='hide'}
+# Decision Tree
+set.seed(1234)
+
+data <- read.csv("police_shooting.csv")
+data <- data %>% select(-state ,-year)
+train <- sample(nrow(data), nrow(data)*0.7)
+data_train <- data[train, ]
+data_test <- data[-train, ]
+
+categorical_vars <- c("high_sch_grads", "unemployment_percent", "total_labor_force",
+"total_checked_firearm", "white", "black", "american_indian_alaskan_native", "asian", 
+"native_hawaiian_pacific_islander", "two_or_more_race", "hispanic_latino", "population")
+categorical_data_frame <- data.frame(Columns = categorical_vars)
+
+tree_model <- rpart(shootings_count_per_mil~., data = data)
+opt_cp <- tree_model$cptable[which.min(tree_model$cptable[ , 'xerror']) , 'CP']
+tree_model_pruned <- prune.rpart(tree_model, opt_cp)
+
+## Diagram
+# rpart.plot(tree_model_pruned)
+
+rmse <- tree_model_pruned %>%
+  predict(data_test) %>%
+  RMSE(data_test$shootings_count_per_mil)
+
+mae <- tree_model_pruned %>%
+  predict(data_test) %>%
+  MAE(data_test$shootings_count_per_mil)
+
+mod_rf <- train(shootings_count_per_mil ~ . , data = data_train, method = "ranger",
+    num.trees = 50,
+    importance = 'impurity',
+    trControl = trainControl("oob"))
+
+rf_rmse <- mod_rf %>%
+  predict(data_test) %>%
+  RMSE(data_test$shootings_count_per_mil)
+
+rf_mae <- mod_rf %>%
+  predict(data_test) %>%
+  MAE(data_test$shootings_count_per_mil)
+
+# df <- data.frame(Model = c('Decision Tree','Random Forest'), RMSE = c(rmse, rf_rmse), MAE = c(mae, rf_mae)) 
+# kable(df, format = "latex", booktabs = TRUE) %>%
+#   kable_styling(full_width = FALSE)
+```
+
+```{r results='hide'}
+# MLR
+x <- read.csv('police_shooting.csv')
+set.seed(100)
+
+# Split the data into training and testing sets
+ind <- runif(nrow(x)) < 0.7
+train_data <- x[ind, ]
+test_data <- x[!ind, ]
+
+MLR <- lm(shootings_count_per_mil ~ state + year + high_sch_grads + unemployment_percent 
+          + total_checked_firearm + white + black +	american_indian_alaskan_native 
+          + asian + native_hawaiian_pacific_islander + two_or_more_race 
+          + hispanic_latino, data = train_data)
+
+# summary(MLR)
+
+predictions <- predict(MLR, newdata = test_data)
+
+# Calculate residuals
+residuals <- test_data$shootings_count_per_mil - predictions
+
+# Identify and remove outliers
+outliers <- which(abs(residuals) > 2 * sd(residuals))
+test_data_no_outliers <- test_data[-outliers, ]
+
+
+predictions_no_outliers <- predict(MLR, newdata = test_data_no_outliers)
+
+plot_data_no_outliers <- data.frame(Actual = test_data_no_outliers$shootings_count_per_mil, 
+                                    Predicted = predictions_no_outliers)
+# ggplot(plot_data_no_outliers, aes(x = Actual, y = Predicted)) + geom_point() +
+#   geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+#   labs(x = "Actual Values", y = "Predicted Values",
+#        title = "MLR Regression (Without Outliers): Predicted vs Actual")
+
+mae_value <- mae(test_data$shootings_count_per_mil, predictions)
+mse_value <- mse(test_data$shootings_count_per_mil, predictions)
+rmse_value <- rmse(test_data$shootings_count_per_mil, predictions)
+r_squared_value <- cor(test_data$shootings_count_per_mil, predictions)^2
+
+new_mae_value <- mae(test_data_no_outliers$shootings_count_per_mil, 
+                     predictions_no_outliers)
+new_mse_value <- mse(test_data_no_outliers$shootings_count_per_mil, 
+                     predictions_no_outliers)
+new_rmse_value <- rmse(test_data_no_outliers$shootings_count_per_mil, 
+                       predictions_no_outliers)
+new_r_squared_value <- cor(test_data_no_outliers$shootings_count_per_mil, 
+                           predictions_no_outliers)^2
+
+evaluation_table <- data.frame(
+  Model = c("MLR", "MLR_no_outliers"),
+  MAE = c(mae_value, new_mae_value),
+  MSE = c(mse_value, new_mse_value),
+  RMSE = c(rmse_value, new_rmse_value),
+  R_squared = c(r_squared_value, new_r_squared_value)
+)
+
+# kable(evaluation_table, format = "latex", booktabs = TRUE) %>%
+#   kable_styling(full_width = FALSE)
+```
+
+```{r results='hide'}
+# Neural Network
+
+P <- read.csv('police_shooting.csv')
+P$state <- as.factor(P$state)
+P$year <- as.factor(P$year)
+
+dummy_transformer <- dummyVars(" ~ .", data = P, levelsOnly = TRUE)
+P <- data.frame(predict(dummy_transformer, newdata = P))
+
+set.seed(10)
+
+idx <- sample(seq(1, 3), size = nrow(P), replace = TRUE, prob = c(.6, .2, .2))
+train_data <- P[idx == 1,]
+test_data <- P[idx == 2,]
+val_data <- P[idx == 3,]
+
+train_y <- train_data$shootings_count_per_mil %>% as.matrix()
+val_y <- val_data$shootings_count_per_mil %>% as.matrix()
+test_y <- test_data$shootings_count_per_mil %>% as.matrix()
+
+predictor_variables <- train_data %>% select(-c("shootings_count_per_mil"))
+preprocess_params <- preProcess(predictor_variables, method = c("range"))
+normalized_predictors <- predict(preprocess_params, predictor_variables)
+train_X <- cbind(normalized_predictors) %>% as.matrix()
+
+predictor_variables <- test_data %>% select(-c("shootings_count_per_mil"))
+preprocess_params <- preProcess(predictor_variables, method = c("range"))
+normalized_predictors <- predict(preprocess_params, predictor_variables)
+test_X <- cbind(normalized_predictors) %>% as.matrix()
+
+predictor_variables <- val_data %>% select(-c("shootings_count_per_mil"))
+preprocess_params <- preProcess(predictor_variables, method = c("range"))
+normalized_predictors <- predict(preprocess_params, predictor_variables)
+val_X <- cbind(normalized_predictors) %>% as.matrix()
+
+mod_nn <- keras_model_sequential() 
+
+mod_nn <- mod_nn %>%
+  layer_dense(units = 16, activation = 'relu', kernel_regularizer = regularizer_l1(0.005), input_shape = ncol(train_X)) %>%
+  layer_dropout(rate = 0.05) %>%
+  layer_dense(units = 1, activation = 'linear')
+
+mod_nn %>% compile(
+  loss = "mse",
+  optimizer = 'adam',
+  metrics = list("mean_absolute_error"))
+
+early_stopping <- callback_early_stopping(monitor = "val_loss", patience = 5)
+
+history = fit(mod_nn, train_X, train_y, epochs = 150, verbose = 0, 
+              validation_data = list(val_X, val_y), callbacks = list(early_stopping))
+
+# Compute predictions
+predictions <- predict(mod_nn, test_X)
+
+# Create a data frame to compare Actual and Predicted values
+results <- data.frame(Actual = as.vector(test_y), Predicted = predictions)
+# head(results)
+
+# Values tried
+width <- c(16, 32, 64, 128)
+depth <- c(1, 2, 3, 4)
+values <- data.frame(width = width, depth = depth) %>% t() %>% as.data.frame()
+colnames(values) <- NULL
+
+# Compute MSE and MAE
+score <- mod_nn %>% evaluate(test_X, test_y, verbose = 0)
+table <- data.frame('Best Depth' = 1, 'Best Width' = 16, MSE = score[[1]], MAE = score[[2]])
+```
+
+# Models
+
+::: columns
+::: {.column width=".35"}
+## **Decision Tree**
+
+-   Optimal $\alpha$ = 0.01
+
+```{r}
+rpart.plot(tree_model_pruned)
+```
+
+## **Random Forest**
+
+-   50 Trees
+
+```{r}
+var_importance <- mod_rf$finalModel$variable.importance %>%
+  sort(decreasing = TRUE) %>% head(3)
+
+data.frame(variable = names(var_importance),
+            importance = var_importance) %>%
+  mutate(word = gsub("w_", "", variable)) %>%
+  ggplot(aes(x = reorder(word, -importance), y = importance)) +
+  geom_col() + xlab("variables") + ylab("importance") +
+  theme(axis.text.x = element_text(angle = 10, size = 15))
+```
+:::
+
+::: {.column width=".3"}
+## **MLR**
+
+Outliers removed from test set
+
+### Pros
+
+-   Improved accuracy
+
+### Cons
+
+-   Might mask certain information
+
+```{r}
+
+ggplot(plot_data_no_outliers, aes(x = Actual, y = Predicted)) + geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  labs(x = "Actual Values", y = "Predicted Values",
+       title = "MLR Regression (Without Outliers): Predicted vs Actual") +
+  theme(axis.text = element_text(size = 20))
+```
+:::
+
+::: {.column width=".3"}
+## **Neural Network**
+
+### Experimented:
+
+-   Width = 16, 32, 64, 128
+
+-   Depth = 1, 2, 3, 4
+
+### Final model:
+
+1 hidden layer with 16 units
+
+### Early Stopping:
+
+```{r}
+plot(history)
+par(cex.lab = 1.5, cex.axis = 1.5)
+```
+:::
+:::
+
+# Models
+
+## **XGBoost**
+
+-   An ensemble learning method
+
+-   Sequentially builds decision trees
+
+-   Each decision tree improves the results of the previous decision tree, improving the accuracy of the overall model
+
+-   Hyperparameters: objective, learning_rate, subsample, colsample_bynode, lambda, max_depth
+
+```{=tex}
+\begin{center}
+
+\includegraphics[height=4cm]{xgboost.png}
+
+\end{center}
+```
+# Conclusion
+
+The table below shows the performance of our model:
+
+```{r}
+
+my_data <- data.frame(
+  Name = c("Model", "MSE", "MAE"),
+  Score1 = c("Artificial Neural Network",  2.702853, 1.016052),
+  Score2 = c("XGBoost", 4.060851, 1.137005),
+  Score3 = c("Decision Tree", 2.328917, 0.9802309),
+  Score4 = c("Random Forest", 3.705386, 1.14077),
+  Score5 = c("MLR", 0.6707084, 0.7350016)
+)
+
+knitr::kable(t(my_data), row.names = FALSE)
+```
+
+## Limitations
+
+We still need to consider other predictors.
+
+# 
+
+Thank you!
